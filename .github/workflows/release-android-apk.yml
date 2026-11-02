@@ -1,0 +1,101 @@
+name: Release Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      builder_repo:
+        description: 'Builder 仓库名称 (如 nodeauth/nodeauth-app-builder)'
+        required: true
+        default: 'nodeauth/nodeauth-app-builder'
+        type: string
+      tag_name:
+        description: 'Release Tag 名称 (例如 v1.0.2)'
+        required: true
+        type: string
+      version:
+        description: 'App 版本号 (例如 1.0.2)'
+        required: true
+        type: string
+      architecture:
+        description: '目标 CPU 架构 (universal 或 arm64-v8a)'
+        required: true
+        default: 'universal'
+        type: string
+      apk_name:
+        description: 'APK 产物名称 (不含 .apk 后缀)'
+        required: true
+        type: string
+  repository_dispatch:
+    types: [android-apk-built]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Download APK and Publish Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: 解析构建元数据
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            REPO="${{ github.event.client_payload.builder_repo }}"
+            TAG="${{ github.event.client_payload.tag_name }}"
+            VERSION="${{ github.event.client_payload.version }}"
+            ARCH="${{ github.event.client_payload.architecture }}"
+            APK_NAME="${{ github.event.client_payload.apk_name }}"
+          else
+            REPO="${{ inputs.builder_repo }}"
+            TAG="${{ inputs.tag_name }}"
+            VERSION="${{ inputs.version }}"
+            ARCH="${{ inputs.architecture }}"
+            APK_NAME="${{ inputs.apk_name }}"
+          fi
+          echo "BUILDER_REPO=$REPO" >> $GITHUB_ENV
+          echo "TAG_NAME=$TAG" >> $GITHUB_ENV
+          echo "APP_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "ARCH=$ARCH" >> $GITHUB_ENV
+          echo "APK_NAME=$APK_NAME" >> $GITHUB_ENV
+
+      - name: 从 Builder 仓库拉取 APK 构建产物
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p dist
+          echo "正在从 ${BUILDER_REPO} (Tag: ${TAG_NAME}) 下载 APK..."
+          gh release download "$TAG_NAME" --repo "$BUILDER_REPO" --pattern "*.apk" --dir dist
+          ls -la dist/
+
+      - name: 准备归档命名与固定直链副本
+        run: |
+          cd dist
+          SRC_APK=$(ls *.apk | head -n 1)
+          if [ -z "$SRC_APK" ]; then
+            echo "错误: 未找到下载的 APK 文件!"
+            exit 1
+          fi
+          # 仅在文件名不同时进行重命名，防止同名 mv 触发 exit code 1
+          if [ "$SRC_APK" != "${APK_NAME}.apk" ]; then
+            mv "$SRC_APK" "${APK_NAME}.apk"
+          fi
+          # 制作供下载页永久直链下载的固定别名（始终提供 NodeAuth-latest.apk）
+          if [ "${APK_NAME}.apk" != "NodeAuth-latest.apk" ]; then
+            cp -f "${APK_NAME}.apk" "NodeAuth-latest.apk"
+          fi
+          if [ -n "$ARCH" ] && [ "${APK_NAME}.apk" != "NodeAuth-latest-${ARCH}.apk" ]; then
+            cp -f "${APK_NAME}.apk" "NodeAuth-latest-${ARCH}.apk"
+          fi
+          echo "=== 待发布文件列表 ==="
+          ls -lh *.apk
+
+      - name: 发布至 GitHub Release (nodeauth 官方仓库)
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ env.TAG_NAME }}
+          name: NodeAuth ${{ env.TAG_NAME }}
+          draft: false
+          prerelease: false
+          files: dist/*.apk
+          generate_release_notes: true
