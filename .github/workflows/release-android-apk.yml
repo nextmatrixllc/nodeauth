@@ -1,0 +1,73 @@
+name: Release Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release Tag (留空默认自动同步最新 Release，例如 v1.0.0)'
+        required: false
+        default: ''
+        type: string
+  repository_dispatch:
+    types: [android-apk-built]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Download APK and Publish Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: 确定目标 Release Tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BUILDER_REPO="nodeauth/nodeauth-app-builder"
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            TAG="${{ github.event.client_payload.tag_name }}"
+          else
+            TAG="${{ inputs.tag_name }}"
+          fi
+
+          # 若留空，自动拉取 Builder 仓库最新发布的 Release Tag
+          if [ -z "$TAG" ]; then
+            echo "未指定 Tag，正在获取 ${BUILDER_REPO} 的最新 Release..."
+            TAG=$(gh release view --repo "$BUILDER_REPO" --json tagName -q .tagName)
+          fi
+
+          echo "目标 Release: $TAG"
+          echo "BUILDER_REPO=$BUILDER_REPO" >> $GITHUB_ENV
+          echo "TAG_NAME=$TAG" >> $GITHUB_ENV
+
+      - name: 从 Builder 仓库拉取 APK 构建产物并规范命名
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p dist
+          echo "正在从 ${BUILDER_REPO} (${TAG_NAME}) 下载 APK..."
+          gh release download "$TAG_NAME" --repo "$BUILDER_REPO" --pattern "*.apk" --dir dist
+
+          # 统一重命名为 NodeAuth-universal.apk
+          SRC_APK=$(ls dist/*.apk | head -n 1)
+          if [ -z "$SRC_APK" ]; then
+            echo "错误: 未找到下载的 APK 文件!"
+            exit 1
+          fi
+          if [ "$SRC_APK" != "dist/NodeAuth-universal.apk" ]; then
+            mv "$SRC_APK" "dist/NodeAuth-universal.apk"
+          fi
+
+          echo "=== 准备发布以下 APK ==="
+          ls -lh dist/*.apk
+
+      - name: 发布至 GitHub Release (nodeauth 官方仓库)
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ env.TAG_NAME }}
+          name: NodeAuth ${{ env.TAG_NAME }}
+          draft: false
+          prerelease: false
+          files: dist/NodeAuth-universal.apk
+          generate_release_notes: true
